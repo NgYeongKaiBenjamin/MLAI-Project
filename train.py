@@ -1,9 +1,10 @@
-import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import matplotlib.pyplot as plt
 import yaml
+import os
+import tensorflow as tf
 
 def load_config(config_path):
     """Load configurations from YAML file."""
@@ -16,6 +17,7 @@ def prepare_data_generators(config):
     batch_size = config['train']['batch_size']
     train_data_path = config['paths']['train_data']
     valid_data_path = config['paths']['valid_data']
+    test_data_path = config['paths']['test_data']
 
     datagen = ImageDataGenerator(rescale=1.0 / 255.0)
 
@@ -33,7 +35,15 @@ def prepare_data_generators(config):
         class_mode='categorical'
     )
 
-    return train_generator, validation_generator
+    test_generator = datagen.flow_from_directory(
+        test_data_path,
+        target_size=(image_size, image_size),
+        batch_size=batch_size,
+        class_mode='categorical',
+        shuffle=False
+    )
+
+    return train_generator, validation_generator, test_generator
 
 def build_model(image_size, num_classes):
     """Build and return the CNN model."""
@@ -75,6 +85,7 @@ def train_and_save_model(model, train_generator, validation_generator, config):
 
     # Save the trained model in .keras format
     model.save(saved_model_path)
+    print("Model has been saved")
 
     # Optional: Save training logs
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir)
@@ -116,11 +127,14 @@ def main():
     config_path = 'dataset_source.yaml'
     config = load_config(config_path)
 
+    # Get class labels from the configuration
+    class_labels = config['classes']
+
     # Prepare data generators
-    train_generator, validation_generator = prepare_data_generators(config)
+    train_generator, validation_generator, test_generator = prepare_data_generators(config)
 
     # Number of classes (derived from YAML file)
-    num_classes = len(config['classes'])
+    num_classes = len(class_labels)
 
     # Build the model
     model = build_model(config['image_size'], num_classes)
@@ -131,19 +145,12 @@ def main():
     # Train and save the model
     history = train_and_save_model(model, train_generator, validation_generator, config)
 
-    # Load the test dataset
-    test_datagen = ImageDataGenerator(rescale=1.0 / 255.0)
-    test_data_path = config['paths']['test_data']
-    test_generator = test_datagen.flow_from_directory(
-        test_data_path,
-        target_size=(config['image_size'], config['image_size']),
-        batch_size=config['train']['batch_size'],
-        class_mode='categorical',
-        shuffle=False
-    )
-
     # Test the model
     test_loss, test_accuracy = test_model(model, test_generator)
+
+    # Print class labels and their indices
+    for i, label in enumerate(class_labels):
+        print(f"Class {i}: {label}")
 
     # Plot training history
     plot_training_history(history)

@@ -36,13 +36,11 @@ plt.ion()  # Interactive mode for real-time updates
 fig, ax = plt.subplots()
 exit_flag = [False]  # Use a mutable object to handle loop control
 
-
 def on_close(event):
     """
     Event handler to set the exit flag when the Matplotlib window is closed.
     """
     exit_flag[0] = True
-
 
 fig.canvas.mpl_connect('close_event', on_close)  # Bind the close event
 
@@ -67,15 +65,16 @@ while True:
         predictions = cnn_model.predict(frame_resized)
         detected_class_index = np.argmax(predictions)
         detected_class_label = class_labels[detected_class_index]
+        confidence = predictions[0][detected_class_index]
     except Exception as e:
         print(f"Error during prediction: {e}")
         break
 
-    print(f"Detected Class: {detected_class_label} (Confidence: {predictions[0][detected_class_index]:.2f})")
+    print(f"Detected Class: {detected_class_label} (Confidence: {confidence:.2f})")
 
     # Annotate the frame based on predictions
     annotated_frame = frame.copy()
-    cv2.putText(annotated_frame, detected_class_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(annotated_frame, f"{detected_class_label} ({confidence:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
     # Convert the frame to RGB for Matplotlib
     rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)

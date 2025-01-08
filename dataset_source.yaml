@@ -4,7 +4,7 @@ classes:
   - eggtart
 train:
   batch_size: 32
-  epochs: 20
+  epochs: 10
   learning_rate: 0.001
   loss_function: categorical_crossentropy
   optimizer: adam

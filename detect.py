@@ -1,24 +1,35 @@
-from tensorflow.keras.metrics import MeanSquaredError
 import tensorflow as tf
 import cv2
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
+import yaml
 
-# Load the trained CNN model from the .h5 file and specify custom metrics
-cnn_model_path = "saved_model/model.keras"
-cnn_model = tf.keras.models.load_model(cnn_model_path, custom_objects={'mse': MeanSquaredError()})
+# Load configuration from the YAML file
+config_path = "dataset_source.yaml"
+with open(config_path, 'r') as file:
+    config = yaml.safe_load(file)
 
-# Image size used in train.py
-image_size = 128
+# Extract class labels and image size from the config
+class_labels = config['classes']
+image_size = config['image_size']
+
+# Load the trained CNN model
+cnn_model_path = config['paths']['saved_model']
+try:
+    cnn_model = tf.keras.models.load_model(cnn_model_path, custom_objects={'mse': tf.keras.metrics.MeanSquaredError()})
+    print(f"Model loaded successfully from {cnn_model_path}")
+except Exception as e:
+    print(f"Error loading model: {e}")
+    sys.exit(1)
 
 # Initialize webcam
 cap = cv2.VideoCapture(0)
-
-if cap.isOpened():
-    print("Camera OK")
+if not cap.isOpened():
+    print("Error: Unable to access the camera.")
+    sys.exit(1)
 else:
-    cap.open()
+    print("Camera initialized successfully.")
 
 # Set up Matplotlib for displaying frames
 plt.ion()  # Interactive mode for real-time updates
@@ -35,26 +46,36 @@ def on_close(event):
 
 fig.canvas.mpl_connect('close_event', on_close)  # Bind the close event
 
+# Real-time detection loop
 while True:
     ret, frame = cap.read()
 
     if not ret:
-        print("Failed to capture image")
+        print("Failed to capture image from the webcam.")
         break
 
-    # Preprocess the frame for CNN (resize and normalize)
-    frame_resized = cv2.resize(frame, (image_size, image_size)) / 255.0  # Normalize the frame
-    frame_resized = np.expand_dims(frame_resized, axis=0)  # Add batch dimension
+    # Preprocess the frame for the CNN model
+    try:
+        frame_resized = cv2.resize(frame, (image_size, image_size)) / 255.0  # Normalize the frame
+        frame_resized = np.expand_dims(frame_resized, axis=0)  # Add batch dimension
+    except Exception as e:
+        print(f"Error during preprocessing: {e}")
+        break
 
-    # Make predictions using the CNN model
-    predictions = cnn_model.predict(frame_resized)
-    detected_class = np.argmax(predictions)  # 0 for no egg tart, 1 for egg tart
-    print(f"Detected Class: {detected_class}")  # Output 0 or 1 to console
+    # Make predictions
+    try:
+        predictions = cnn_model.predict(frame_resized)
+        detected_class_index = np.argmax(predictions)
+        detected_class_label = class_labels[detected_class_index]
+    except Exception as e:
+        print(f"Error during prediction: {e}")
+        break
+
+    print(f"Detected Class: {detected_class_label} (Confidence: {predictions[0][detected_class_index]:.2f})")
 
     # Annotate the frame based on predictions
     annotated_frame = frame.copy()
-    label = "Egg Tart" if detected_class == 1 else "No Egg Tart"
-    cv2.putText(annotated_frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(annotated_frame, detected_class_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
     # Convert the frame to RGB for Matplotlib
     rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
@@ -68,8 +89,10 @@ while True:
 
     # Exit if the Matplotlib window is closed
     if exit_flag[0]:
+        print("Exiting detection loop.")
         break
 
+# Cleanup resources
 cap.release()
 plt.close()  # Close the Matplotlib window
 sys.exit()

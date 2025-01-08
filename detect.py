@@ -3,9 +3,10 @@ import tensorflow as tf
 import cv2
 import sys
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Load the trained CNN model from the .h5 file and specify custom metrics
-cnn_model_path = "saved_model/model.h5"
+cnn_model_path = "saved_model/model.keras"
 cnn_model = tf.keras.models.load_model(cnn_model_path, custom_objects={'mse': MeanSquaredError()})
 
 # Image size used in train.py
@@ -18,6 +19,21 @@ if cap.isOpened():
     print("Camera OK")
 else:
     cap.open()
+
+# Set up Matplotlib for displaying frames
+plt.ion()  # Interactive mode for real-time updates
+fig, ax = plt.subplots()
+exit_flag = [False]  # Use a mutable object to handle loop control
+
+
+def on_close(event):
+    """
+    Event handler to set the exit flag when the Matplotlib window is closed.
+    """
+    exit_flag[0] = True
+
+
+fig.canvas.mpl_connect('close_event', on_close)  # Bind the close event
 
 while True:
     ret, frame = cap.read()
@@ -32,25 +48,28 @@ while True:
 
     # Make predictions using the CNN model
     predictions = cnn_model.predict(frame_resized)
-    print(f"Predictions: {predictions}")
+    detected_class = np.argmax(predictions)  # 0 for no egg tart, 1 for egg tart
+    print(f"Detected Class: {detected_class}")  # Output 0 or 1 to console
 
-    # For demonstration, show predictions on the frame (modify as needed based on your output)
+    # Annotate the frame based on predictions
     annotated_frame = frame.copy()
-
-    # Modify the display based on your output (adjust according to model type)
-    label = f"Prediction: {np.argmax(predictions)}"  # If your model does classification
-    # For bounding box or other detection models, adjust accordingly
-
-    # Display the label on the frame
+    label = "Egg Tart" if detected_class == 1 else "No Egg Tart"
     cv2.putText(annotated_frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    # Display the frame with CNN predictions
-    cv2.imshow("CNN Detection", annotated_frame)
+    # Convert the frame to RGB for Matplotlib
+    rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
 
-    # Quit on 'q' key press
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    # Display the annotated frame using Matplotlib
+    ax.clear()
+    ax.imshow(rgb_frame)
+    ax.set_title("Real-Time Detection")
+    ax.axis("off")
+    plt.pause(0.001)  # Small pause to update the figure
+
+    # Exit if the Matplotlib window is closed
+    if exit_flag[0]:
         break
 
 cap.release()
-cv2.destroyAllWindows()
+plt.close()  # Close the Matplotlib window
 sys.exit()

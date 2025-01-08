@@ -1,5 +1,16 @@
-path: datasets/Data/
-train: train/images
-val: valid/images
-names: 
-  0: Egg Tarts
+image_size: 128
+classes: 
+  - no_eggtart
+  - eggtart
+train:
+  batch_size: 32
+  epochs: 20
+  learning_rate: 0.001
+  loss_function: categorical_crossentropy
+  optimizer: adam
+paths:
+  train_data: Data/train
+  valid_data: Data/valid
+  test_data: Data/test
+  saved_model: saved_model/model.keras
+  logs: logs/

@@ -9,8 +9,9 @@ train:
   loss_function: categorical_crossentropy
   optimizer: adam
 paths:
-  train_data: Data/train
-  valid_data: Data/valid
-  test_data: Data/test
+  train_data: "Data/train"
+  valid_data: "Data/valid"
+  test_data: "Data/test"
   saved_model: saved_model/model.keras
   logs: logs/
+

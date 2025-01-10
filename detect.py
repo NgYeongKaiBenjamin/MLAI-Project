@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import yaml
 
 # Load configuration from the YAML file
-config_path = "dataset_source.yaml"
+config_path = "config.yaml"
 with open(config_path, 'r') as file:
     config = yaml.safe_load(file)
 

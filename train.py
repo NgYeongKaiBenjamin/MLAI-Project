@@ -9,14 +9,24 @@ import os
 import tensorflow as tf
 import numpy as np
 
-# Ensure GPU memory growth is enabled
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        print(e)
+def check_gpu_availability():
+    """Check and enable GPU availability."""
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("GPU memory growth enabled.")
+        except RuntimeError as e:
+            print(f"Error enabling GPU memory growth: {e}")
+    
+    if tf.test.is_gpu_available():
+        print("TensorFlow is using the GPU.")
+    else:
+        print("TensorFlow is not using the GPU.")
+
+# Verify GPU usage
+check_gpu_availability()
 
 def load_config(config_path):
     """Load configurations from YAML file."""
@@ -82,7 +92,6 @@ def build_model(image_size, num_classes):
         Dense(num_classes, activation='softmax')
     ])
     return model
-
 
 def compile_model(model, config):
     """Compile the model."""
@@ -162,12 +171,13 @@ def main():
     train_generator, validation_generator, test_generator = prepare_data_generators(config)
     num_classes = len(class_labels)
 
-    model = build_model(config['image_size'], num_classes)
-    compile_model(model, config)
+    with tf.device('/GPU:0'):  # Specify GPU usage
+        model = build_model(config['image_size'], num_classes)
+        compile_model(model, config)
 
-    history = train_and_save_model(model, train_generator, validation_generator, config)
-    test_model(model, test_generator, class_labels)
-    plot_training_history(history)
+        history = train_and_save_model(model, train_generator, validation_generator, config)
+        test_model(model, test_generator, class_labels)
+        plot_training_history(history)
 
 if __name__ == '__main__':
     main()

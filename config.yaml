@@ -1,9 +1,10 @@
-image_size: 128
+image_size: 224
 classes: 
-  - no_eggtart
-  - eggtart
+  - Eggtarts
+  - Salmon Sashimi
+  - Unknown
 train:
-  batch_size: 32
+  batch_size: 16
   epochs: 10
   learning_rate: 0.001
   loss_function: categorical_crossentropy
@@ -12,6 +13,7 @@ paths:
   train_data: "Data/train"
   valid_data: "Data/valid"
   test_data: "Data/test"
-  saved_model: saved_model/model.keras
+  plots: "Plot/"
+  saved_model: saved_model/
   logs: logs/
-
+  output_dir: "output/"

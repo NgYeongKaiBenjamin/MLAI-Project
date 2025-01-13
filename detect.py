@@ -4,20 +4,20 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import yaml
+from preprocessing_utils import preprocess_image  # Import the preprocessing function
 
-# Load configuration from the YAML file
+# Load configuration
 config_path = "config.yaml"
 with open(config_path, 'r') as file:
     config = yaml.safe_load(file)
 
-# Extract class labels and image size from the config
 class_labels = config['classes']
 image_size = config['image_size']
 
-# Load the trained CNN model
-cnn_model_path = config['paths']['saved_model']
+# Load model
+cnn_model_path = f"{config['paths']['saved_model']}/best_model.h5"
 try:
-    cnn_model = tf.keras.models.load_model(cnn_model_path, custom_objects={'mse': tf.keras.metrics.MeanSquaredError()})
+    cnn_model = tf.keras.models.load_model(cnn_model_path)
     print(f"Model loaded successfully from {cnn_model_path}")
 except Exception as e:
     print(f"Error loading model: {e}")
@@ -28,70 +28,74 @@ cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("Error: Unable to access the camera.")
     sys.exit(1)
-else:
-    print("Camera initialized successfully.")
 
-# Set up Matplotlib for displaying frames
-plt.ion()  # Interactive mode for real-time updates
+plt.ion()
 fig, ax = plt.subplots()
-exit_flag = [False]  # Use a mutable object to handle loop control
+exit_flag = [False]
 
 def on_close(event):
-    """
-    Event handler to set the exit flag when the Matplotlib window is closed.
-    """
     exit_flag[0] = True
 
-fig.canvas.mpl_connect('close_event', on_close)  # Bind the close event
+fig.canvas.mpl_connect('close_event', on_close)
 
-# Real-time detection loop
+# Add debug information
+print(f"Model input shape: {cnn_model.input_shape}")
+print(f"Model output shape: {cnn_model.output_shape}")
+print(f"Class labels: {class_labels}")
+
 while True:
     ret, frame = cap.read()
-
     if not ret:
-        print("Failed to capture image from the webcam.")
+        print("Failed to capture image")
         break
 
-    # Preprocess the frame for the CNN model
+    # Preprocess using the same function as training
     try:
-        frame_resized = cv2.resize(frame, (image_size, image_size)) / 255.0  # Normalize the frame
-        frame_resized = np.expand_dims(frame_resized, axis=0)  # Add batch dimension
-    except Exception as e:
-        print(f"Error during preprocessing: {e}")
-        break
-
-    # Make predictions
-    try:
-        predictions = cnn_model.predict(frame_resized)
-        detected_class_index = np.argmax(predictions)
+        processed_frame = preprocess_image(frame, image_size)
+        # Add batch dimension
+        model_input = np.expand_dims(processed_frame, axis=0)
+        
+        # Debug shapes
+        print(f"Input shape: {model_input.shape}")
+        
+        # Make prediction
+        predictions = cnn_model.predict(model_input, verbose=0)
+        print(f"Raw predictions: {predictions}")
+        
+        detected_class_index = np.argmax(predictions[0])
         detected_class_label = class_labels[detected_class_index]
         confidence = predictions[0][detected_class_index]
+        
+        # Print all class probabilities for debugging
+        for i, prob in enumerate(predictions[0]):
+            print(f"{class_labels[i]}: {prob:.4f}")
+            
     except Exception as e:
         print(f"Error during prediction: {e}")
         break
 
-    print(f"Detected Class: {detected_class_label} (Confidence: {confidence:.2f})")
-
-    # Annotate the frame based on predictions
+    # Annotate frame
     annotated_frame = frame.copy()
-    cv2.putText(annotated_frame, f"{detected_class_label} ({confidence:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(
+        annotated_frame,
+        f"{detected_class_label} ({confidence:.2f})",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0, 255, 0),
+        2
+    )
 
-    # Convert the frame to RGB for Matplotlib
+    # Display
     rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-
-    # Display the annotated frame using Matplotlib
     ax.clear()
     ax.imshow(rgb_frame)
     ax.set_title("Real-Time Detection")
     ax.axis("off")
-    plt.pause(0.001)  # Small pause to update the figure
+    plt.pause(0.001)
 
-    # Exit if the Matplotlib window is closed
     if exit_flag[0]:
-        print("Exiting detection loop.")
         break
 
-# Cleanup resources
 cap.release()
-plt.close()  # Close the Matplotlib window
-sys.exit()
+plt.close()

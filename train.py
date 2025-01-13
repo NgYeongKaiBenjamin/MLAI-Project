@@ -1,183 +1,215 @@
+import os
+import numpy as np
+import cv2
+import yaml
+import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler, TensorBoard
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
-import yaml
-import os
-import tensorflow as tf
-import numpy as np
+import shutil
 
-def check_gpu_availability():
-    """Check and enable GPU availability."""
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            print("GPU memory growth enabled.")
-        except RuntimeError as e:
-            print(f"Error enabling GPU memory growth: {e}")
+class DataGenerator:
+    def __init__(self, config):
+        self.image_size = config['image_size']
+        self.batch_size = config['train']['batch_size']
+        self.classes = config['classes']
+        
+    def create_generator(self, data_path):
+        """Create a data generator for the given path."""
+        def generator():
+            while True:
+                images = []
+                labels = []
+                count = 0
+                
+                class_folders = self.classes
+                for class_idx, class_name in enumerate(class_folders):
+                    class_path = os.path.join(data_path, class_name)
+                    images_folder = os.path.join(class_path, "images")
+                    
+                    if not os.path.exists(images_folder):
+                        continue
+                        
+                    image_files = [f for f in os.listdir(images_folder) 
+                                 if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                    np.random.shuffle(image_files)
+                    
+                    for img_file in image_files:
+                        if count == self.batch_size:
+                            yield np.array(images), np.array(labels)
+                            images = []
+                            labels = []
+                            count = 0
+                            
+                        img_path = os.path.join(images_folder, img_file)
+                        img = cv2.imread(img_path)
+                        if img is None:
+                            continue
+                            
+                        img = self.preprocess_image(img)
+                        images.append(img)
+                        labels.append(tf.keras.utils.to_categorical(class_idx, len(self.classes)))
+                        count += 1
+                        
+                if images:
+                    yield np.array(images), np.array(labels)
+                    
+        return generator()
     
-    if tf.test.is_gpu_available():
-        print("TensorFlow is using the GPU.")
-    else:
-        print("TensorFlow is not using the GPU.")
-
-# Verify GPU usage
-check_gpu_availability()
-
-def load_config(config_path):
-    """Load configurations from YAML file."""
-    with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+    def preprocess_image(self, image):
+        """Preprocess a single image."""
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (self.image_size, self.image_size))
+        image = image.astype(np.float32) / 255.0
+        return image
+        
+    def count_samples(self, data_path):
+        """Count total number of samples in a directory."""
+        total = 0
+        for class_name in self.classes:
+            images_folder = os.path.join(data_path, class_name, "images")
+            if os.path.exists(images_folder):
+                total += len([f for f in os.listdir(images_folder) 
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        return total
 
 def prepare_data_generators(config):
-    """Prepare data generators for training and validation."""
-    image_size = config['image_size']
-    batch_size = config['train']['batch_size']
-
-    train_path = config['paths']['train_data']
-    valid_path = config['paths']['valid_data']
-    test_path = config['paths']['test_data']
-
-    datagen_train = ImageDataGenerator(
-        rescale=1.0 / 255.0,
-        rotation_range=20,
-        width_shift_range=0.2,
-        height_shift_range=0.2,
-        shear_range=0.2,
-        zoom_range=0.2,
-        horizontal_flip=True,
-    )
-    datagen_valid_test = ImageDataGenerator(rescale=1.0 / 255.0)
-
-    train_generator = datagen_train.flow_from_directory(
-        train_path,
-        target_size=(image_size, image_size),
-        batch_size=batch_size,
-        class_mode='categorical'
-    )
-
-    validation_generator = datagen_valid_test.flow_from_directory(
-        valid_path,
-        target_size=(image_size, image_size),
-        batch_size=batch_size,
-        class_mode='categorical'
-    )
-
-    test_generator = datagen_valid_test.flow_from_directory(
-        test_path,
-        target_size=(image_size, image_size),
-        batch_size=batch_size,
-        class_mode='categorical',
-        shuffle=False
-    )
-
-    return train_generator, validation_generator, test_generator
+    """Prepare data generators for training, validation, and testing."""
+    data_gen = DataGenerator(config)
+    
+    # Use the correct paths from the config
+    train_path = os.path.join(config['paths']['output_base_path'], 'train')
+    valid_path = os.path.join(config['paths']['output_base_path'], 'valid')
+    test_path = os.path.join(config['paths']['output_base_path'], 'test')
+    
+    train_generator = data_gen.create_generator(train_path)
+    valid_generator = data_gen.create_generator(valid_path)
+    test_generator = data_gen.create_generator(test_path)
+    
+    train_steps = max(1, data_gen.count_samples(train_path) 
+                     // config['train']['batch_size'])
+    valid_steps = max(1, data_gen.count_samples(valid_path) 
+                     // config['train']['batch_size'])
+    test_steps = max(1, data_gen.count_samples(test_path) 
+                    // config['train']['batch_size'])
+    
+    return ((train_generator, train_steps), 
+            (valid_generator, valid_steps), 
+            (test_generator, test_steps),
+            len(config['classes']))
 
 def build_model(image_size, num_classes):
-    """Build and return the CNN model with L2 regularization in the Dense layer."""
     model = Sequential([
-        Conv2D(32, (3, 3), activation='relu', input_shape=(image_size, image_size, 3)),
-        MaxPooling2D((2, 2)),
-        Conv2D(64, (3, 3), activation='relu'),
-        MaxPooling2D((2, 2)),
-        Conv2D(128, (3, 3), activation='relu'),
-        MaxPooling2D((2, 2)),
+        Conv2D(64, (3, 3), activation='relu', padding='same', 
+               input_shape=(image_size, image_size, 3)),
+        BatchNormalization(),
+        MaxPooling2D(pool_size=(2, 2)),
+        
+        Conv2D(128, (3, 3), activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.25),
+        
+        Conv2D(256, (3, 3), activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.25),
+        
         Flatten(),
-        Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+        Dense(512, activation='relu'),
+        BatchNormalization(),
         Dropout(0.5),
         Dense(num_classes, activation='softmax')
     ])
+    
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+    
     return model
 
-def compile_model(model, config):
-    """Compile the model."""
-    learning_rate = config['train']['learning_rate']
-    optimizer_name = config['train']['optimizer']
-    loss_function = config['train']['loss_function']
-
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate) if optimizer_name == 'adam' else None
-    model.compile(optimizer=optimizer, loss=loss_function, metrics=['accuracy'])
-
-def train_and_save_model(model, train_generator, validation_generator, config):
-    """Train the model and save it."""
-    epochs = config['train']['epochs']
-    saved_model_path = config['paths']['saved_model']
-    log_dir = config['paths']['logs']
-
-    # Early stopping and learning rate scheduler
-    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    lr_scheduler = LearningRateScheduler(lambda epoch: config['train']['learning_rate'] * 0.95 ** epoch)
-
-    # Train the model
+def train_model(model, train_data, valid_data, config):
+    """Train the model with the specified configuration."""
+    train_generator, train_steps = train_data
+    valid_generator, valid_steps = valid_data
+    
+    callbacks = [
+        EarlyStopping(
+            monitor='val_loss',
+            patience=5,
+            restore_best_weights=True
+        ),
+        ModelCheckpoint(
+            config['paths']['saved_model'],
+            monitor='val_loss',
+            save_best_only=True
+        ),
+        ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.2,
+            patience=3,
+            min_lr=1e-6
+        )
+    ]
+    
     history = model.fit(
         train_generator,
-        epochs=epochs,
-        validation_data=validation_generator,
-        callbacks=[early_stopping, lr_scheduler, TensorBoard(log_dir=log_dir)]
+        steps_per_epoch=train_steps,
+        validation_data=valid_generator,
+        validation_steps=valid_steps,
+        epochs=config['train']['epochs'],
+        callbacks=callbacks
     )
-
-    model.save(saved_model_path)
-    print("Model has been saved")
+    
     return history
 
-def test_model(model, test_generator, class_labels):
-    """Evaluate the model and print metrics."""
-    print("Evaluating model on test data...")
-    test_loss, test_accuracy = model.evaluate(test_generator, verbose=1)
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
-
-    y_true = test_generator.classes
-    y_pred = np.argmax(model.predict(test_generator), axis=-1)
-
-    print("\nClassification Report:")
-    print(classification_report(y_true, y_pred, target_names=class_labels))
-
-    print("\nConfusion Matrix:")
-    print(confusion_matrix(y_true, y_pred))
-
-    return test_loss, test_accuracy
-
-def plot_training_history(history):
-    """Plot training and validation accuracy and loss."""
-    plt.figure(figsize=(12, 6))
-    plt.subplot(1, 2, 1)
-    plt.plot(history.history['accuracy'], label='Training Accuracy')
-    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-    plt.title('Training and Validation Accuracy')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-    plt.legend()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(history.history['loss'], label='Training Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title('Training and Validation Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
-
-    plt.tight_layout()
-    plt.show()
+def plot_metrics(history, plots_path):
+    """Plot and save training metrics."""
+    metrics = ['accuracy', 'loss']
+    for metric in metrics:
+        plt.figure(figsize=(10, 6))
+        plt.plot(history.history[metric], label=f'Training {metric}')
+        plt.plot(history.history[f'val_{metric}'], label=f'Validation {metric}')
+        plt.title(f'{metric.capitalize()} Over Time')
+        plt.xlabel('Epoch')
+        plt.ylabel(metric.capitalize())
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(plots_path, f'{metric}_plot.png'))
+        plt.close()
 
 def main():
-    config_path = 'config.yaml'
-    config = load_config(config_path)
+    # Load configuration
+    with open('config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    
+    # Create necessary directories
+    os.makedirs(config['paths']['saved_model'], exist_ok=True)
+    os.makedirs(config['paths']['logs'], exist_ok=True)
+    os.makedirs(config['paths']['output_dir'], exist_ok=True)
+    os.makedirs(config['paths']['plots'], exist_ok=True)
+    
+    # Prepare data generators
+    print("Preparing data generators...")
+    data = prepare_data_generators(config)
+    train_data, valid_data, test_data, num_classes = data
+    
+    # Build and train model
+    print("Building model...")
+    model = build_model(config['image_size'], num_classes)
+    
+    print("Training model...")
+    history = train_model(model, train_data, valid_data, config)
+    
+    # Plot training metrics
+    print("Plotting metrics...")
+    plot_metrics(history, config['paths']['plots'])
+    
+    print("Training completed successfully!")
 
-    class_labels = config['classes']
-    train_generator, validation_generator, test_generator = prepare_data_generators(config)
-    num_classes = len(class_labels)
-
-    with tf.device('/GPU:0'):  # Specify GPU usage
-        model = build_model(config['image_size'], num_classes)
-        compile_model(model, config)
-
-        history = train_and_save_model(model, train_generator, validation_generator, config)
-        test_model(model, test_generator, class_labels)
-        plot_training_history(history)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

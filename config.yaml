@@ -1,17 +1,39 @@
-image_size: 128
+# Model configuration
+image_size: 256
 classes: 
-  - no_eggtart
-  - eggtart
+  - Eggtart
+  - Salmon Sashimi
+  - Unknown
+
+# Training parameters
 train:
-  batch_size: 32
+  batch_size: 16
   epochs: 10
   learning_rate: 0.001
   loss_function: categorical_crossentropy
   optimizer: adam
-paths:
-  train_data: "Data/train"
-  valid_data: "Data/valid"
-  test_data: "Data/test"
-  saved_model: saved_model/model.keras
-  logs: logs/
 
+# Data split ratios
+data_split:
+  train_ratio: 0.7
+  valid_ratio: 0.2
+  test_ratio: 0.1
+
+# Paths configuration
+paths:
+  # Original data path (where your YOLO formatted data is)
+  data_path: "Data/original"
+  
+  # Output path for processed and split data
+  output_base_path: "Data/processed"
+  
+  # Paths for split data (these will be automatically populated)
+  train_data: "Data/processed/train"
+  valid_data: "Data/processed/valid"
+  test_data: "Data/processed/test"
+  
+  # Model and logging paths
+  saved_model: "saved_model/model.h5"
+  logs: "logs/"
+  output_dir: "output/"
+  plots: "plots/"

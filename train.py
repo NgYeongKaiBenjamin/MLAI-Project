@@ -1,6 +1,7 @@
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import yaml
@@ -49,80 +50,134 @@ def preprocess_image(image, target_size):
     image = image.astype(np.float32) / 255.0
     return image
 
+
 def prepare_data_generators(config):
-    """Memory-optimized data generator preparation."""
+    """Memory-optimized data generator preparation with balanced class sizes."""
     image_size = config['image_size']
     train_path = config['paths']['train_data']
     valid_path = config['paths']['valid_data']
     batch_size = config['train']['batch_size']
+    
+    def preprocess_image(image):
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (image_size, image_size))
+        image = image.astype(np.float32) / 255.0
+        return image
 
-    def data_generator(data_path, batch_size):
+    # Create data augmentation pipeline
+    train_datagen = ImageDataGenerator(
+        rescale=1./255,  # Remove this if preprocessing already scales
+        rotation_range=30,
+        zoom_range=0.2,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        horizontal_flip=True,
+        fill_mode='nearest'
+    )
+
+    valid_datagen = ImageDataGenerator(
+        rescale=1./255  # Remove this if preprocessing already scales
+    )
+
+    def get_class_sizes(data_path):
+        """Get the number of valid images per class after parsing labels."""
+        class_sizes = {}
+        
+        for class_folder in os.listdir(data_path):
+            if not os.path.isdir(os.path.join(data_path, class_folder)):
+                continue
+                
+            images_folder = os.path.join(data_path, class_folder, "images")
+            labels_folder = os.path.join(data_path, class_folder, "labels")
+            
+            if not (os.path.exists(images_folder) and os.path.exists(labels_folder)):
+                continue
+                
+            valid_images = sum(1 for img_file in os.listdir(images_folder)
+                             if img_file.lower().endswith(('.jpg', '.jpeg', '.png'))
+                             and os.path.exists(os.path.join(labels_folder, 
+                                              os.path.splitext(img_file)[0] + '.txt')))
+            
+            class_sizes[class_folder] = valid_images
+            
+        return class_sizes
+
+    def create_generator(data_path, datagen, batch_size, is_training=True):
+        class_sizes = get_class_sizes(data_path)
+        min_class_size = min(class_sizes.values())
+        
         while True:
             images = []
             labels = []
             count = 0
-
-            class_folders = [f for f in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, f))]
             
-            # Find the class with the smallest number of images
-            min_class_size = float('inf')
-            for class_folder in class_folders:
-                images_folder = os.path.join(data_path, class_folder, "images")
-                if os.path.exists(images_folder):
-                    class_size = len([f for f in os.listdir(images_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-                    min_class_size = min(min_class_size, class_size)
-
+            class_folders = [f for f in os.listdir(data_path) 
+                           if os.path.isdir(os.path.join(data_path, f))]
+            
             for class_folder in class_folders:
                 class_idx = config['classes'].index(class_folder)
                 images_folder = os.path.join(data_path, class_folder, "images")
-
+                
                 if not os.path.exists(images_folder):
                     continue
-
-                image_files = [f for f in os.listdir(images_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
                 
-                # Shuffle image files and take the first min_class_size images
+                image_files = [f for f in os.listdir(images_folder)
+                             if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
                 np.random.shuffle(image_files)
-                image_files = image_files[:min_class_size]
-
-                for img_file in image_files:
+                
+                for img_file in image_files[:min_class_size]:
                     if count == batch_size:
-                        yield np.array(images), np.array(labels)
+                        # Convert lists to numpy arrays
+                        batch_images = np.array(images)
+                        batch_labels = np.array(labels)
+                        yield batch_images, batch_labels
                         images = []
                         labels = []
                         count = 0
-
+                    
                     img_path = os.path.join(images_folder, img_file)
                     img = cv2.imread(img_path)
                     if img is None:
                         continue
-
-                    img = preprocess_image(img, image_size)
+                    
+                    # Convert BGR to RGB and resize
+                    if len(img.shape) == 3 and img.shape[2] == 3:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    img = cv2.resize(img, (image_size, image_size))
+                    
+                    if is_training:
+                        # Apply augmentation to individual image
+                        img = img.astype(np.float32)  # Convert to float32
+                        img = img.reshape((1,) + img.shape)  # Add batch dimension
+                        img = next(datagen.flow(img, batch_size=1))[0]  # Get augmented image
+                    
                     images.append(img)
-                    labels.append(tf.keras.utils.to_categorical(class_idx, len(config['classes'])))
+                    labels.append(tf.keras.utils.to_categorical(class_idx, 
+                                                             len(config['classes'])))
                     count += 1
-
+            
             if images:
-                yield np.array(images), np.array(labels)
+                batch_images = np.array(images)
+                batch_labels = np.array(labels)
+                yield batch_images, batch_labels
 
-    def count_images(path):
-        total = 0
-        for class_folder in os.listdir(path):
-            images_folder = os.path.join(path, class_folder, "images")
-            if os.path.exists(images_folder):
-                total += len([f for f in os.listdir(images_folder) 
-                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-        return total
+    def calculate_steps(path, batch_size):
+        class_sizes = get_class_sizes(path)
+        min_class_size = min(class_sizes.values())
+        total_samples = min_class_size * len(class_sizes)
+        return max(1, total_samples // batch_size)
 
-    train_steps = max(1, count_images(train_path) // batch_size)
-    valid_steps = max(1, count_images(valid_path) // batch_size)
+    train_steps = calculate_steps(train_path, batch_size)
+    valid_steps = calculate_steps(valid_path, batch_size)
 
     print(f"Training steps per epoch: {train_steps}")
     print(f"Validation steps per epoch: {valid_steps}")
 
-    return (data_generator(train_path, batch_size), train_steps), \
-           (data_generator(valid_path, batch_size), valid_steps), \
-           len(config['classes'])
+    train_generator = create_generator(train_path, train_datagen, batch_size, is_training=True)
+    valid_generator = create_generator(valid_path, valid_datagen, batch_size, is_training=False)
+
+    return (train_generator, train_steps), (valid_generator, valid_steps), len(config['classes'])
 
 def build_model(image_size, num_classes):
     """Memory-optimized model architecture with shape validation."""
@@ -136,35 +191,43 @@ def build_model(image_size, num_classes):
     if not isinstance(num_classes, int) or num_classes <= 0:
         raise ValueError(f"Invalid num_classes: {num_classes}")
     
+    # Modify the build_model function to use fewer filters and add regularization:
     model = Sequential([
         # Input layer
         tf.keras.layers.InputLayer(input_shape=(image_size, image_size, 3)),
         
-        # First block - start with fewer filters
-        Conv2D(128, (3, 3), activation='relu', padding='same'),
-        BatchNormalization(),
+        # First block
         Conv2D(128, (3, 3), activation='relu', padding='same'),
         BatchNormalization(),
         MaxPooling2D(pool_size=(2, 2)),
-        Dropout(0.5),
+        
+        # Second block
+        Conv2D(256, (3, 3), activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.3),
         
         # Third block
-        Conv2D(128, (3, 3), activation='relu', padding='same'),
+        Conv2D(512, (3, 3), activation='relu', padding='same'),
         BatchNormalization(),
-        Conv2D(128, (3, 3), activation='relu', padding='same'),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.4),
+        
+        # Fourth block (added)
+        Conv2D(512, (3, 3), activation='relu', padding='same'),
         BatchNormalization(),
         MaxPooling2D(pool_size=(2, 2)),
         Dropout(0.5),
         
         # Dense layers
         Flatten(),
-        Dense(256, activation='relu'),
+        Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
         BatchNormalization(),
         Dropout(0.5),
         Dense(num_classes, activation='softmax')
     ])
     
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
     model.compile(
         optimizer=optimizer,
         loss='categorical_crossentropy',
@@ -177,75 +240,146 @@ def build_model(image_size, num_classes):
     return model
 
 def train_model(model, train_data, valid_data, config):
-    """Memory-optimized training function with improved error handling."""
+    """Memory-optimized training function with enhanced callbacks and data augmentation."""
     train_generator, train_steps = train_data
     valid_generator, valid_steps = valid_data
-    
-    # Create checkpoint directory if it doesn't exist
-    try:
-        checkpoint_dir = os.path.dirname(config['paths']['saved_model'])
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        print(f"Using checkpoint directory: {checkpoint_dir}")
-    except PermissionError:
-        # Fallback to a user-writable directory
-        import tempfile
-        checkpoint_dir = tempfile.gettempdir()
-        print(f"Permission denied for original directory. Using temporary directory: {checkpoint_dir}")
-    
-    model_path = os.path.join(checkpoint_dir, 'best_model.h5')
-    final_model_path = os.path.join(checkpoint_dir, 'final_model.h5')
-    
+
+    # Create checkpoint directory in user space
+    import os
+    checkpoint_dir = config['paths']['checkpoint_dir']
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, 'best_model_temp.h5')
+    final_model_path = os.path.join(config['paths']['saved_model'], 'final_model.h5')
+    os.makedirs(config['paths']['saved_model'], exist_ok=True)
+
+    # Data augmentation
+    data_augmentation = tf.keras.Sequential([
+        tf.keras.layers.RandomRotation(0.2),
+        tf.keras.layers.RandomZoom(0.2),
+        tf.keras.layers.RandomFlip("horizontal")
+    ])
+
+    class SafeModelCheckpoint(ModelCheckpoint):
+        """Custom checkpoint callback with safe saving mechanism."""
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.best_weights = None
+
+        def on_epoch_end(self, epoch, logs=None):
+            current = logs.get(self.monitor)
+            if self.monitor_op(current, self.best):
+                self.best = current
+                self.best_weights = self.model.get_weights()
+                print(f'\nEpoch {epoch + 1}: {self.monitor} improved from {self.best} to {current}')
+
+    def scheduler(epoch, lr):
+        """Custom learning rate scheduler function."""
+        if epoch < 10:
+            return lr  # Keep the initial learning rate for the first 10 epochs
+        else:
+            return lr * tf.math.exp(-0.1)  # Exponentially decay learning rate
+
+    # Enhanced callbacks configuration
     callbacks = [
-        EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            restore_best_weights=True,
-            verbose=1
-        ),
-        ModelCheckpoint(
-            model_path,
+        # Existing callbacks
+        SafeModelCheckpoint(
+            checkpoint_path,
             monitor='val_loss',
             save_best_only=True,
             verbose=1
         ),
-        ReduceLROnPlateau(
+        EarlyStopping(
             monitor='val_loss',
-            factor=0.2,
-            patience=5,
-            min_lr=1e-6,
-            verbose=1
-        )
+            patience=15,  # Increased patience
+            restore_best_weights=True,
+            verbose=1,
+            min_delta=0.001  # Minimum change to qualify as an improvement
+        ),
+        # ReduceLROnPlateau(
+        #     monitor='val_loss',
+        #     factor=0.2,
+        #     patience=5,
+        #     min_lr=1e-6,
+        #     verbose=1,
+        #     cooldown=2  # Added cooldown period
+        # ),
+        # LearningRateScheduler(scheduler, verbose=1)
     ]
-    
+
     try:
+        tf.config.run_functions_eagerly(True)
+        tf.get_logger().setLevel('ERROR')
+        # Apply data augmentation to training data
+        augmented_train_generator = (
+            (data_augmentation(images, training=True), labels)
+            for images, labels in train_generator
+        )
+
+        # Train the model
         history = model.fit(
-            train_generator,
+            augmented_train_generator,
             steps_per_epoch=train_steps,
             validation_data=valid_generator,
             validation_steps=valid_steps,
             epochs=config['train']['epochs'],
             callbacks=callbacks,
-            workers=1,
+            workers=0,  # Disable multiprocessing to reduce file handling issues
             use_multiprocessing=False
         )
-        
-        # Try to save the final model
+
+        # Load best weights if checkpoint exists
+        if os.path.exists(checkpoint_path):
+            model.load_weights(checkpoint_path)
+            print(f"Loaded weights from checkpoint: {checkpoint_path}")
+        else:
+            print(f"No checkpoint found at {checkpoint_path}, skipping weight loading.")
+
+        # Save final model
+        model.save(final_model_path)
+        print(f"Model successfully saved to: {final_model_path}")
+        test_model(model, valid_data, config)
+
+        # Save model artifacts
+        print("\nSaving model artifacts...")
         try:
-            model.save(final_model_path)
-            print(f"Final model saved to: {final_model_path}")
-        except Exception as e:
-            print(f"Warning: Could not save final model to {final_model_path}")
-            print(f"Error: {str(e)}")
-            # Try saving to temporary directory
-            temp_path = os.path.join(tempfile.gettempdir(), 'final_model.h5')
-            model.save(temp_path)
-            print(f"Model saved to temporary location: {temp_path}")
-        
+            os.makedirs(os.path.dirname(final_model_path), exist_ok=True)
+
+            # Save model architecture
+            model_json = model.to_json()
+            architecture_path = os.path.join(os.path.dirname(final_model_path), 'model_architecture.json')
+            with open(architecture_path, 'w') as f:
+                f.write(model_json)
+            print(f"Saved model architecture to {architecture_path}")
+
+            # Save weights
+            weights_path = os.path.join(os.path.dirname(final_model_path), 'model_weights.h5')
+            model.save_weights(weights_path)
+            print(f"Saved model weights to {weights_path}")
+
+            # Save training history
+            history_path = os.path.join(os.path.dirname(final_model_path), 'training_history.npy')
+            np.save(history_path, history.history)
+            print(f"Saved training history to {history_path}")
+
+        except Exception as save_error:
+            print(f"Warning: Error saving model artifacts: {str(save_error)}")
+
         return history
-    
-    except Exception as e:
-        print(f"Error during training: {str(e)}")
+
+    except Exception as train_error:
+        print(f"Error during training: {str(train_error)}")
         raise
+    
+    finally:
+        # Cleanup
+        try:
+            if os.path.exists(checkpoint_path):
+                import shutil
+                shutil.rmtree(checkpoint_path)
+        except:
+            print("Warning: Could not clean up temporary directory")
+
+
 
 def plot_metrics(history, output_dir):
     if not os.path.exists(output_dir):
@@ -336,6 +470,52 @@ def create_directories(paths):
             print(f"Directory created: {path}")
         else:
             print(f"Directory already exists: {path}")
+
+def test_model(model, valid_data, config):
+    """Evaluate the trained model on validation data and display a classification report and confusion matrix."""
+    valid_generator, valid_steps = valid_data
+    class_labels = config['classes']
+
+    # Evaluate the model
+    print("\nEvaluating the model on validation data...")
+    val_loss, val_accuracy = model.evaluate(valid_generator, steps=valid_steps, verbose=1)
+    print(f"\nValidation Loss: {val_loss:.4f}")
+    print(f"Validation Accuracy: {val_accuracy:.4f}")
+
+    # Generate predictions
+    print("\nGenerating predictions...")
+    y_true = []
+    y_pred = []
+
+    for i, (images, labels) in enumerate(valid_generator):
+        if i >= valid_steps:
+            break
+        predictions = model.predict(images)
+        y_true.extend(np.argmax(labels, axis=1))
+        y_pred.extend(np.argmax(predictions, axis=1))
+
+    # Generate classification report
+    print("\nClassification Report:")
+    print(classification_report(y_true, y_pred, target_names=class_labels))
+
+    # Generate confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    print("\nConfusion Matrix:")
+    print(cm)
+
+    # Plot confusion matrix
+    plt.figure(figsize=(8, 6))
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title('Confusion Matrix')
+    plt.colorbar()
+    tick_marks = np.arange(len(class_labels))
+    plt.xticks(tick_marks, class_labels, rotation=45)
+    plt.yticks(tick_marks, class_labels)
+
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.tight_layout()
+    plt.show()
 
 def main():
     # Clear any existing sessions

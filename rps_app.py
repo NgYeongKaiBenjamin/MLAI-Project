@@ -4,7 +4,7 @@ from PIL import Image
 import tensorflow as tf
 
 # Load the trained Keras model
-model = tf.keras.models.load_model('saved_model/best_model.keras')
+model = tf.keras.models.load_model('saved_model/final_model.h5')
 
 # Image size used during training
 image_size = 128  # Ensure this matches the image size used in training
@@ -14,7 +14,7 @@ st.write("""
          """
          )
 
-st.write("This app classifies images as either Eggtarts or Salmon Sashimi.")
+st.write("This app classifies images as either Eggtarts or Salmon Sashimi, or Unknown if confidence is low.")
 
 file = st.file_uploader("Please upload an image file", type=["jpg", "png"])
 
@@ -34,19 +34,21 @@ else:
     predictions = model.predict(image_array)[0]  # Get the predictions for the first batch
 
     # Define the threshold for classification
-    threshold = 0.5
-    classes = ['Eggtarts', 'Salmon Sashimi']
+    threshold = 0.3
+    classes = ['Eggtarts', 'Salmon Sashimi', 'Unknown']
 
-    # Determine the predicted classes
-    detected_classes = []
-    for i, prob in enumerate(predictions):
-        if prob >= threshold:
-            detected_classes.append((classes[i], prob))
+    # Get the predicted class with the highest probability
+    predicted_class_index = np.argmax(predictions)
+    predicted_class = classes[predicted_class_index]
+    confidence = predictions[predicted_class_index]
 
-    # Display results
-    if detected_classes:
-        for cls, prob in detected_classes:
-            st.write(f"Class: {cls}, Confidence: {prob:.2%}")
+    # Check if the confidence is above the threshold
+    if confidence >= threshold:
+        st.write(f"Predicted Class: {predicted_class}")
+        st.write(f"Confidence: {confidence:.2%}")
         st.success("Classification completed successfully!")
     else:
-        st.warning("No class detected with sufficient confidence.")
+        # If confidence is below threshold, classify as Unknown
+        st.write(f"Predicted Class: {classes[2]}")
+        st.write(f"Confidence: {confidence:.2%}")
+        st.warning("The model couldn't classify the image with sufficient confidence. It is classified as Unknown.")

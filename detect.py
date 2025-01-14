@@ -15,7 +15,7 @@ class_labels = config['classes']
 image_size = config['image_size']
 
 # Load model
-cnn_model_path = f"{config['paths']['saved_model']}/best_model.h5"
+cnn_model_path = f"{config['paths']['saved_model']}/final_model.h5"
 try:
     cnn_model = tf.keras.models.load_model(cnn_model_path)
     print(f"Model loaded successfully from {cnn_model_path}")

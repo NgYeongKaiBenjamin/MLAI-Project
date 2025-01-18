@@ -10,174 +10,146 @@ import tensorflow as tf
 import numpy as np
 import cv2
 import sys
+import math
+from tensorflow.keras.utils import Sequence
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
+    
 
 def check_gpu_availability():
     gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            # Set memory limit to 90% of available VRAM
-            tf.config.set_logical_device_configuration(
-                gpus[0],
-                [tf.config.LogicalDeviceConfiguration(memory_limit=5400)]  # 5.4GB for RTX 2060
-            )
-            print("GPU memory configuration set successfully.")
-        except RuntimeError as e:
-            print(f"Error configuring GPU: {e}")
-    
-    if tf.test.is_gpu_available():
-        print("TensorFlow is using the GPU.")
-    else:
-        print("TensorFlow is using the CPU.")
+    if not gpus:
+        print("No GPU available")
+        return
+
+    try:
+        # Set memory growth before any virtual device configurations
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("Memory growth enabled for GPUs:", gpus)
+    except ValueError as e:
+        print("Error enabling memory growth:", e)
+
 
 def load_config(config_path):
     with open(config_path, 'r') as file:
         return yaml.safe_load(file)
 
-def normalize_class_name(name):
-    name_mapping = {
-        'Eggtarts': 'Eggtarts',
-        'Salmon Sashimi':'Salmon Sashimi',
-        'Unknown':'Unknown'
-    }
-    return name_mapping.get(name, name)
-
-def preprocess_image(image, target_size):
-    if len(image.shape) == 3 and image.shape[2] == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image = cv2.resize(image, (target_size, target_size))
-    image = image.astype(np.float32) / 255.0
-    return image
-
-
 def prepare_data_generators(config):
-    """Memory-optimized data generator preparation with balanced class sizes."""
+    """Memory-optimized data generator preparation with class balancing."""
     image_size = config['image_size']
     train_path = config['paths']['train_data']
     valid_path = config['paths']['valid_data']
     batch_size = config['train']['batch_size']
-    
-    def preprocess_image(image):
-        if len(image.shape) == 3 and image.shape[2] == 3:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(image, (image_size, image_size))
-        image = image.astype(np.float32) / 255.0
-        return image
 
-    # Create data augmentation pipeline
+    class BalancedDirectoryIterator(tf.keras.preprocessing.image.DirectoryIterator):
+        def _set_filepaths_and_classes(self, directory):
+            self.filenames = []
+            self.classes = []
+            classes = sorted([d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))])
+            self.num_classes = len(classes)
+            self.class_indices = dict(zip(classes, range(len(classes))))
+            
+            # First pass: count images per class
+            class_counts = {}
+            for class_name in classes:
+                images_path = os.path.join(directory, class_name, 'images')
+                if os.path.exists(images_path):
+                    class_counts[class_name] = len([f for f in os.listdir(images_path) 
+                                                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+            
+            # Find the size of the smallest class
+            min_class_size = min(class_counts.values())
+            print(f"\nBalancing classes to {min_class_size} images each (smallest class size)")
+            
+            # Second pass: limit each class to min_class_size
+            for class_name in classes:
+                class_idx = self.class_indices[class_name]
+                images_path = os.path.join(directory, class_name, 'images')
+                
+                if os.path.exists(images_path):
+                    image_files = [f for f in os.listdir(images_path) 
+                                 if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                    # Randomly select min_class_size images
+                    selected_files = np.random.choice(image_files, min_class_size, replace=False)
+                    
+                    for fname in selected_files:
+                        self.filenames.append(os.path.join(class_name, 'images', fname))
+                        self.classes.append(class_idx)
+            
+            self.samples = len(self.filenames)
+            print(f"Total samples after balancing: {self.samples}")
+
+    # Create data augmentation for training
     train_datagen = ImageDataGenerator(
-        rescale=1./255,  # Remove this if preprocessing already scales
-        rotation_range=30,
+        rescale=1./255,
+        rotation_range=20,
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        shear_range=0.2,
         zoom_range=0.2,
-        width_shift_range=0.1,
-        height_shift_range=0.1,
         horizontal_flip=True,
-        fill_mode='nearest'
+        brightness_range=[0.8, 1.2],
+        validation_split=0.1
     )
 
+    # Simple rescaling for validation
     valid_datagen = ImageDataGenerator(
-        rescale=1./255  # Remove this if preprocessing already scales
+        rescale=1./255
     )
 
-    def get_class_sizes(data_path):
-        """Get the number of valid images per class after parsing labels."""
-        class_sizes = {}
-        
-        for class_folder in os.listdir(data_path):
-            if not os.path.isdir(os.path.join(data_path, class_folder)):
+    def print_class_distribution(data_path):
+        print(f"\nClass distribution in {data_path}:")
+        for class_name in os.listdir(data_path):
+            class_path = os.path.join(data_path, class_name)
+            if not os.path.isdir(class_path):
                 continue
                 
-            images_folder = os.path.join(data_path, class_folder, "images")
-            labels_folder = os.path.join(data_path, class_folder, "labels")
-            
-            if not (os.path.exists(images_folder) and os.path.exists(labels_folder)):
-                continue
-                
-            valid_images = sum(1 for img_file in os.listdir(images_folder)
-                             if img_file.lower().endswith(('.jpg', '.jpeg', '.png'))
-                             and os.path.exists(os.path.join(labels_folder, 
-                                              os.path.splitext(img_file)[0] + '.txt')))
-            
-            class_sizes[class_folder] = valid_images
-            
-        return class_sizes
+            images_dir = os.path.join(class_path, "images")
+            if os.path.exists(images_dir):
+                image_count = len([f for f in os.listdir(images_dir) 
+                                 if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                print(f"- {class_name}: {image_count} images")
 
-    def create_generator(data_path, datagen, batch_size, is_training=True):
-        class_sizes = get_class_sizes(data_path)
-        min_class_size = min(class_sizes.values())
-        
-        while True:
-            images = []
-            labels = []
-            count = 0
-            
-            class_folders = [f for f in os.listdir(data_path) 
-                           if os.path.isdir(os.path.join(data_path, f))]
-            
-            for class_folder in class_folders:
-                class_idx = config['classes'].index(class_folder)
-                images_folder = os.path.join(data_path, class_folder, "images")
-                
-                if not os.path.exists(images_folder):
-                    continue
-                
-                image_files = [f for f in os.listdir(images_folder)
-                             if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                np.random.shuffle(image_files)
-                
-                for img_file in image_files[:min_class_size]:
-                    if count == batch_size:
-                        # Convert lists to numpy arrays
-                        batch_images = np.array(images)
-                        batch_labels = np.array(labels)
-                        yield batch_images, batch_labels
-                        images = []
-                        labels = []
-                        count = 0
-                    
-                    img_path = os.path.join(images_folder, img_file)
-                    img = cv2.imread(img_path)
-                    if img is None:
-                        continue
-                    
-                    # Convert BGR to RGB and resize
-                    if len(img.shape) == 3 and img.shape[2] == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    img = cv2.resize(img, (image_size, image_size))
-                    
-                    if is_training:
-                        # Apply augmentation to individual image
-                        img = img.astype(np.float32)  # Convert to float32
-                        img = img.reshape((1,) + img.shape)  # Add batch dimension
-                        img = next(datagen.flow(img, batch_size=1))[0]  # Get augmented image
-                    
-                    images.append(img)
-                    labels.append(tf.keras.utils.to_categorical(class_idx, 
-                                                             len(config['classes'])))
-                    count += 1
-            
-            if images:
-                batch_images = np.array(images)
-                batch_labels = np.array(labels)
-                yield batch_images, batch_labels
+    print("\nOriginal class distribution:")
+    print_class_distribution(train_path)
+    print_class_distribution(valid_path)
 
-    def calculate_steps(path, batch_size):
-        class_sizes = get_class_sizes(path)
-        min_class_size = min(class_sizes.values())
-        total_samples = min_class_size * len(class_sizes)
-        return max(1, total_samples // batch_size)
+    try:
+        train_generator = BalancedDirectoryIterator(
+            train_path,
+            train_datagen,
+            target_size=(image_size, image_size),
+            batch_size=batch_size,
+            class_mode='categorical',
+            shuffle=True,
+            interpolation='nearest'
+        )
 
-    train_steps = calculate_steps(train_path, batch_size)
-    valid_steps = calculate_steps(valid_path, batch_size)
+        valid_generator = BalancedDirectoryIterator(
+            valid_path,
+            valid_datagen,
+            target_size=(image_size, image_size),
+            batch_size=batch_size,
+            class_mode='categorical',
+            shuffle=False,
+            interpolation='nearest'
+        )
 
-    print(f"Training steps per epoch: {train_steps}")
-    print(f"Validation steps per epoch: {valid_steps}")
+        train_steps = math.ceil(train_generator.samples / train_generator.batch_size)
+        valid_steps = math.ceil(valid_generator.samples / valid_generator.batch_size)
 
-    train_generator = create_generator(train_path, train_datagen, batch_size, is_training=True)
-    valid_generator = create_generator(valid_path, valid_datagen, batch_size, is_training=False)
+        print(f"\nAfter balancing:")
+        print(f"Training samples per class: {train_generator.samples // len(train_generator.class_indices)}")
+        print(f"Validation samples per class: {valid_generator.samples // len(valid_generator.class_indices)}")
+        print(f"Class mapping: {train_generator.class_indices}")
+        print(f"Training steps per epoch: {train_steps}")
+        print(f"Validation steps per epoch: {valid_steps}")
 
-    return (train_generator, train_steps), (valid_generator, valid_steps), len(config['classes'])
+        return (train_generator, train_steps), (valid_generator, valid_steps), len(train_generator.class_indices)
+
+    except Exception as e:
+        print(f"Error setting up data generators: {str(e)}")
+        raise
 
 def build_model(image_size, num_classes):
     """Memory-optimized model architecture with shape validation."""
@@ -195,39 +167,40 @@ def build_model(image_size, num_classes):
     model = Sequential([
         # Input layer
         tf.keras.layers.InputLayer(input_shape=(image_size, image_size, 3)),
-        
-        # First block
-        Conv2D(128, (3, 3), activation='relu', padding='same'),
+
+        # First block - basic features
+        Conv2D(32, (3, 3), activation='relu', padding='same'),
         BatchNormalization(),
+        Conv2D(32, (3, 3), activation='relu', padding='same'),
         MaxPooling2D(pool_size=(2, 2)),
-        
-        # Second block
-        Conv2D(256, (3, 3), activation='relu', padding='same'),
+        Dropout(0.25),
+
+        # Second block - more complex features
+        Conv2D(48, (3, 3), activation='relu', padding='same'),
         BatchNormalization(),
+        Conv2D(48, (3, 3), activation='relu', padding='same'),
         MaxPooling2D(pool_size=(2, 2)),
-        Dropout(0.3),
-        
-        # Third block
-        Conv2D(512, (3, 3), activation='relu', padding='same'),
+        Dropout(0.25),
+
+        # Third block - high-level features
+        Conv2D(64, (3, 3), activation='relu', padding='same'),
         BatchNormalization(),
+        Conv2D(64, (3, 3), activation='relu', padding='same'),
         MaxPooling2D(pool_size=(2, 2)),
-        Dropout(0.4),
-        
-        # Fourth block (added)
-        Conv2D(512, (3, 3), activation='relu', padding='same'),
-        BatchNormalization(),
-        MaxPooling2D(pool_size=(2, 2)),
-        Dropout(0.5),
-        
-        # Dense layers
+        Dropout(0.25),
+
         Flatten(),
-        Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+        Dense(64, activation='relu',  # Increase from 48
+            kernel_regularizer=tf.keras.regularizers.l2(0.003)),
         BatchNormalization(),
-        Dropout(0.5),
+        Dropout(0.3),  # Reduce dropout
         Dense(num_classes, activation='softmax')
     ])
     
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
+
+    # Use it in your optimizer
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+    optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
     model.compile(
         optimizer=optimizer,
         loss='categorical_crossentropy',
@@ -240,145 +213,101 @@ def build_model(image_size, num_classes):
     return model
 
 def train_model(model, train_data, valid_data, config):
-    """Memory-optimized training function with enhanced callbacks and data augmentation."""
+    """Kaggle-optimized training function."""
     train_generator, train_steps = train_data
     valid_generator, valid_steps = valid_data
 
-    # Create checkpoint directory in user space
-    import os
+    # Create checkpoint directory
     checkpoint_dir = config['paths']['checkpoint_dir']
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, 'best_model_temp.h5')
     final_model_path = os.path.join(config['paths']['saved_model'], 'final_model.h5')
     os.makedirs(config['paths']['saved_model'], exist_ok=True)
 
-    # Data augmentation
-    data_augmentation = tf.keras.Sequential([
-        tf.keras.layers.RandomRotation(0.2),
-        tf.keras.layers.RandomZoom(0.2),
-        tf.keras.layers.RandomFlip("horizontal")
-    ])
-
-    class SafeModelCheckpoint(ModelCheckpoint):
-        """Custom checkpoint callback with safe saving mechanism."""
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.best_weights = None
-
-        def on_epoch_end(self, epoch, logs=None):
-            current = logs.get(self.monitor)
-            if self.monitor_op(current, self.best):
-                self.best = current
-                self.best_weights = self.model.get_weights()
-                print(f'\nEpoch {epoch + 1}: {self.monitor} improved from {self.best} to {current}')
-
-    def scheduler(epoch, lr):
-        """Custom learning rate scheduler function."""
-        if epoch < 10:
-            return lr  # Keep the initial learning rate for the first 10 epochs
-        else:
-            return lr * tf.math.exp(-0.1)  # Exponentially decay learning rate
-
-    # Enhanced callbacks configuration
+    # Simplified callbacks to reduce memory usage
     callbacks = [
-        # Existing callbacks
-        SafeModelCheckpoint(
+        ModelCheckpoint(
             checkpoint_path,
             monitor='val_loss',
+            mode='min',  # Explicitly set mode
             save_best_only=True,
             verbose=1
         ),
         EarlyStopping(
             monitor='val_loss',
-            patience=15,  # Increased patience
+            mode='min',  # Explicitly set mode
+            patience=20,  # Increase patience since improvement is steady
             restore_best_weights=True,
-            verbose=1,
-            min_delta=0.001  # Minimum change to qualify as an improvement
+            verbose=1
         ),
-        # ReduceLROnPlateau(
-        #     monitor='val_loss',
-        #     factor=0.2,
-        #     patience=5,
-        #     min_lr=1e-6,
-        #     verbose=1,
-        #     cooldown=2  # Added cooldown period
-        # ),
-        # LearningRateScheduler(scheduler, verbose=1)
+        ReduceLROnPlateau(
+            monitor='val_loss',
+            mode='min',  # Explicitly set mode
+            factor=0.2,
+            patience=7,
+            min_lr=1e-6,
+            verbose=1
+        )
     ]
 
     try:
-        tf.config.run_functions_eagerly(True)
-        tf.get_logger().setLevel('ERROR')
-        # Apply data augmentation to training data
-        augmented_train_generator = (
-            (data_augmentation(images, training=True), labels)
-            for images, labels in train_generator
-        )
-
-        # Train the model
+        # Clear any existing session
+        tf.keras.backend.clear_session()
+        
+        # Enable memory growth
+        check_gpu_availability()
+        
+        # Reduce precision to save memory
+        tf.keras.mixed_precision.set_global_policy('mixed_float16')
+        
+        # Verify data shapes before training
+        print("\nVerifying data shapes:")
+        sample_batch = next(iter(train_generator))
+        print(f"Sample batch shapes - X: {sample_batch[0].shape}, y: {sample_batch[1].shape}")
+        
+        # Start training with garbage collection
+        import gc
+        class_weights = {
+            0: 1.0,  # Eggtarts
+            1: 1.2,  # Salmon Sashimi (slightly higher weight)
+            2: 1.0   # Unknown
+        }
+        print("\nStarting training...")
         history = model.fit(
-            augmented_train_generator,
+            train_generator,
             steps_per_epoch=train_steps,
             validation_data=valid_generator,
             validation_steps=valid_steps,
             epochs=config['train']['epochs'],
             callbacks=callbacks,
-            workers=0,  # Disable multiprocessing to reduce file handling issues
-            use_multiprocessing=False
+            verbose=1, 
+            class_weight=class_weights
+            # workers=2,  # Reduced number of workers
+            # max_queue_size=10,  # Reduced queue size
+            # use_multiprocessing=False  # Disable multiprocessing
         )
-
-        # Load best weights if checkpoint exists
-        if os.path.exists(checkpoint_path):
-            model.load_weights(checkpoint_path)
-            print(f"Loaded weights from checkpoint: {checkpoint_path}")
-        else:
-            print(f"No checkpoint found at {checkpoint_path}, skipping weight loading.")
-
+        
+        gc.collect()  # Force garbage collection
+        
         # Save final model
-        model.save(final_model_path)
-        print(f"Model successfully saved to: {final_model_path}")
-        test_model(model, valid_data, config)
-
-        # Save model artifacts
-        print("\nSaving model artifacts...")
-        try:
-            os.makedirs(os.path.dirname(final_model_path), exist_ok=True)
-
-            # Save model architecture
-            model_json = model.to_json()
-            architecture_path = os.path.join(os.path.dirname(final_model_path), 'model_architecture.json')
-            with open(architecture_path, 'w') as f:
-                f.write(model_json)
-            print(f"Saved model architecture to {architecture_path}")
-
-            # Save weights
-            weights_path = os.path.join(os.path.dirname(final_model_path), 'model_weights.h5')
-            model.save_weights(weights_path)
-            print(f"Saved model weights to {weights_path}")
-
-            # Save training history
-            history_path = os.path.join(os.path.dirname(final_model_path), 'training_history.npy')
-            np.save(history_path, history.history)
-            print(f"Saved training history to {history_path}")
-
-        except Exception as save_error:
-            print(f"Warning: Error saving model artifacts: {str(save_error)}")
-
+        print("\nSaving model...")
+        model.save(final_model_path, save_format='h5')
+        
         return history
 
-    except Exception as train_error:
-        print(f"Error during training: {str(train_error)}")
+    except Exception as e:
+        print(f"\nError during training: {str(e)}")
+        print("Stack trace:")
+        import traceback
+        traceback.print_exc()
         raise
-    
     finally:
         # Cleanup
-        try:
-            if os.path.exists(checkpoint_path):
-                import shutil
-                shutil.rmtree(checkpoint_path)
-        except:
-            print("Warning: Could not clean up temporary directory")
-
+        if os.path.exists(checkpoint_path):
+            try:
+                os.remove(checkpoint_path)
+            except Exception as e:
+                print(f"Warning: Could not clean up checkpoint: {str(e)}")
 
 
 def plot_metrics(history, output_dir):
@@ -563,7 +492,7 @@ def main():
     with open(os.path.join(model_dir, 'model_architecture.json'), 'w') as f:
         f.write(model_json)
     
-    weights_path = os.path.join(model_dir, 'model_weights.h5')
+    weights_path = os.path.join(model_dir, 'model_weights.keras')
     model.save_weights(weights_path)
     
     # Clear session

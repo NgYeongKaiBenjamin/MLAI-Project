@@ -7,7 +7,7 @@ import tensorflow as tf
 model = tf.keras.models.load_model('saved_model/final_model.h5')
 
 # Image size used during training
-image_size = 128  # Ensure this matches the image size used in training
+image_size = 512  # Ensure this matches the image size used in training
 
 st.write("""
          # Food Classification App

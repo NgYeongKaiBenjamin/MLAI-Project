@@ -1,12 +1,12 @@
-image_size: 128
+image_size: 512
 classes: 
   - Eggtarts
   - Salmon Sashimi
   - Unknown
 train:
-  batch_size: 32
-  epochs: 20
-  learning_rate: 0.01
+  batch_size: 16
+  epochs: 200
+  learning_rate: 0.0001
   loss_function: categorical_crossentropy
   optimizer: adam
 paths:

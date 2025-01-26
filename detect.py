@@ -13,6 +13,7 @@ with open(config_path, 'r') as file:
 
 class_labels = config['classes']
 image_size = config['image_size']
+CONFIDENCE_THRESHOLD = 0.5
 
 # Load model
 cnn_model_path = f"{config['paths']['saved_model']}/final_model.h5"
@@ -38,11 +39,6 @@ def on_close(event):
 
 fig.canvas.mpl_connect('close_event', on_close)
 
-# Add debug information
-print(f"Model input shape: {cnn_model.input_shape}")
-print(f"Model output shape: {cnn_model.output_shape}")
-print(f"Class labels: {class_labels}")
-
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -55,20 +51,18 @@ while True:
         # Add batch dimension
         model_input = np.expand_dims(processed_frame, axis=0)
         
-        # Debug shapes
-        print(f"Input shape: {model_input.shape}")
-        
         # Make prediction
         predictions = cnn_model.predict(model_input, verbose=0)
-        print(f"Raw predictions: {predictions}")
         
         detected_class_index = np.argmax(predictions[0])
-        detected_class_label = class_labels[detected_class_index]
         confidence = predictions[0][detected_class_index]
         
-        # Print all class probabilities for debugging
-        for i, prob in enumerate(predictions[0]):
-            print(f"{class_labels[i]}: {prob:.4f}")
+        # Check confidence threshold
+        if confidence >= CONFIDENCE_THRESHOLD and class_labels[detected_class_index]!="Unknown":
+            detected_class_label = class_labels[detected_class_index]
+        else:
+            detected_class_label = "Unknown"
+            confidence = 0
             
     except Exception as e:
         print(f"Error during prediction: {e}")
@@ -78,7 +72,7 @@ while True:
     annotated_frame = frame.copy()
     cv2.putText(
         annotated_frame,
-        f"{detected_class_label} ({confidence:.2f})",
+        f"{detected_class_label} ({confidence:.2f})" if confidence > 0 else "Unknown",
         (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         1,

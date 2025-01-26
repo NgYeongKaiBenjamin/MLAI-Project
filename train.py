@@ -1,5 +1,5 @@
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization, SpatialDropout2D, GlobalAveragePooling2D
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from sklearn.metrics import classification_report, confusion_matrix
@@ -8,13 +8,10 @@ import yaml
 import os
 import tensorflow as tf
 import numpy as np
-import cv2
-import sys
 import math
-from tensorflow.keras.utils import Sequence
-from tensorflow.keras.optimizers.schedules import ExponentialDecay
+import gc
     
-
+#Checks GPU availability
 def check_gpu_availability():
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if not gpus:
@@ -29,75 +26,20 @@ def check_gpu_availability():
     except ValueError as e:
         print("Error enabling memory growth:", e)
 
-
+#Loads yaml file
 def load_config(config_path):
     with open(config_path, 'r') as file:
         return yaml.safe_load(file)
 
+#Prepares Data Generators
 def prepare_data_generators(config):
-    """Memory-optimized data generator preparation with class balancing."""
     image_size = config['image_size']
     train_path = config['paths']['train_data']
     valid_path = config['paths']['valid_data']
+    test_path = config['paths']['test_data']
     batch_size = config['train']['batch_size']
 
-    class BalancedDirectoryIterator(tf.keras.preprocessing.image.DirectoryIterator):
-        def _set_filepaths_and_classes(self, directory):
-            self.filenames = []
-            self.classes = []
-            classes = sorted([d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))])
-            self.num_classes = len(classes)
-            self.class_indices = dict(zip(classes, range(len(classes))))
-            
-            # First pass: count images per class
-            class_counts = {}
-            for class_name in classes:
-                images_path = os.path.join(directory, class_name, 'images')
-                if os.path.exists(images_path):
-                    class_counts[class_name] = len([f for f in os.listdir(images_path) 
-                                                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-            
-            # Find the size of the smallest class
-            min_class_size = min(class_counts.values())
-            print(f"\nBalancing classes to {min_class_size} images each (smallest class size)")
-            
-            # Second pass: limit each class to min_class_size
-            for class_name in classes:
-                class_idx = self.class_indices[class_name]
-                images_path = os.path.join(directory, class_name, 'images')
-                
-                if os.path.exists(images_path):
-                    image_files = [f for f in os.listdir(images_path) 
-                                 if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                    # Randomly select min_class_size images
-                    selected_files = np.random.choice(image_files, min_class_size, replace=False)
-                    
-                    for fname in selected_files:
-                        self.filenames.append(os.path.join(class_name, 'images', fname))
-                        self.classes.append(class_idx)
-            
-            self.samples = len(self.filenames)
-            print(f"Total samples after balancing: {self.samples}")
-
-    # Create data augmentation for training
-    train_datagen = ImageDataGenerator(
-        rescale=1./255,
-        rotation_range=20,
-        width_shift_range=0.2,
-        height_shift_range=0.2,
-        shear_range=0.2,
-        zoom_range=0.2,
-        horizontal_flip=True,
-        brightness_range=[0.8, 1.2],
-        validation_split=0.1
-    )
-
-    # Simple rescaling for validation
-    valid_datagen = ImageDataGenerator(
-        rescale=1./255
-    )
-
-    def print_class_distribution(data_path):
+    def print_class_distribution(data_path): #Prints number of images per class
         print(f"\nClass distribution in {data_path}:")
         for class_name in os.listdir(data_path):
             class_path = os.path.join(data_path, class_name)
@@ -114,45 +56,66 @@ def prepare_data_generators(config):
     print_class_distribution(train_path)
     print_class_distribution(valid_path)
 
-    try:
-        train_generator = BalancedDirectoryIterator(
-            train_path,
-            train_datagen,
-            target_size=(image_size, image_size),
-            batch_size=batch_size,
-            class_mode='categorical',
-            shuffle=True,
-            interpolation='nearest'
-        )
+    # Create data augmentation for training
+    train_datagen = ImageDataGenerator( 
+        rescale=1./255,
+        rotation_range=20,
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        shear_range=0.2,
+        zoom_range=0.2,
+        horizontal_flip=True,
+        brightness_range=[0.8, 1.2],
+        channel_shift_range=50.0
+    )
 
-        valid_generator = BalancedDirectoryIterator(
-            valid_path,
-            valid_datagen,
-            target_size=(image_size, image_size),
-            batch_size=batch_size,
-            class_mode='categorical',
-            shuffle=False,
-            interpolation='nearest'
-        )
+    # Simple rescaling for validation
+    valid_datagen = ImageDataGenerator(
+        rescale=1./255
+    )
+    test_datagen = ImageDataGenerator(rescale=1./255)
 
-        train_steps = math.ceil(train_generator.samples / train_generator.batch_size)
-        valid_steps = math.ceil(valid_generator.samples / valid_generator.batch_size)
+    #Create Data Generator
+    train_generator = train_datagen.flow_from_directory(
+        train_path,
+        target_size=(image_size, image_size),
+        batch_size=batch_size,
+        class_mode='categorical',
+        shuffle=True,
+        interpolation='nearest'
+    )
+    valid_generator = valid_datagen.flow_from_directory(
+        valid_path,
+        target_size=(image_size, image_size),
+        batch_size=batch_size,
+        class_mode='categorical',
+        shuffle=False,
+        interpolation='nearest'
+    )
+    test_generator = test_datagen.flow_from_directory(  
+        test_path,
+        target_size=(image_size, image_size),
+        batch_size=batch_size,
+        class_mode='categorical',
+        shuffle=False,
+        interpolation='nearest'
+    )
 
-        print(f"\nAfter balancing:")
-        print(f"Training samples per class: {train_generator.samples // len(train_generator.class_indices)}")
-        print(f"Validation samples per class: {valid_generator.samples // len(valid_generator.class_indices)}")
-        print(f"Class mapping: {train_generator.class_indices}")
-        print(f"Training steps per epoch: {train_steps}")
-        print(f"Validation steps per epoch: {valid_steps}")
+    #Calculate Steps
+    train_steps = math.ceil(train_generator.samples / train_generator.batch_size)
+    valid_steps = math.ceil(valid_generator.samples / valid_generator.batch_size)
+    test_steps = math.ceil(test_generator.samples / test_generator.batch_size)
 
-        return (train_generator, train_steps), (valid_generator, valid_steps), len(train_generator.class_indices)
+    print(f"\nTraining samples: {train_generator.samples}")
+    print(f"Validation samples: {valid_generator.samples}")
+    print(f"Class mapping: {train_generator.class_indices}")
+    print(f"Training steps per epoch: {train_steps}")
+    print(f"Validation steps per epoch: {valid_steps}")
 
-    except Exception as e:
-        print(f"Error setting up data generators: {str(e)}")
-        raise
+    return (train_generator, train_steps), (valid_generator, valid_steps), (test_generator, test_steps), len(train_generator.class_indices)
 
-def build_model(image_size, num_classes):
-    """Memory-optimized model architecture with shape validation."""
+#Build model
+def build_model(config,image_size, num_classes):
     print(f"\nBuilding model with:")
     print(f"Input shape: ({image_size}, {image_size}, 3)")
     print(f"Number of classes: {num_classes}")
@@ -168,42 +131,50 @@ def build_model(image_size, num_classes):
         # Input layer
         tf.keras.layers.InputLayer(input_shape=(image_size, image_size, 3)),
 
-        # First block - basic features
-        Conv2D(32, (3, 3), activation='relu', padding='same'),
+        #First Block
+        Conv2D(32, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
+        Conv2D(32, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
         BatchNormalization(),
-        Conv2D(32, (3, 3), activation='relu', padding='same'),
         MaxPooling2D(pool_size=(2, 2)),
-        Dropout(0.25),
+        SpatialDropout2D(0.1), 
 
-        # Second block - more complex features
-        Conv2D(48, (3, 3), activation='relu', padding='same'),
+        # Second block with residual-like connection
+        Conv2D(48, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
+        Conv2D(48, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
         BatchNormalization(),
-        Conv2D(48, (3, 3), activation='relu', padding='same'),
         MaxPooling2D(pool_size=(2, 2)),
-        Dropout(0.25),
+        SpatialDropout2D(0.1),
 
-        # Third block - high-level features
-        Conv2D(64, (3, 3), activation='relu', padding='same'),
+        # Third block with increased capacity
+        Conv2D(64, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
+        Conv2D(64, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
         BatchNormalization(),
-        Conv2D(64, (3, 3), activation='relu', padding='same'),
         MaxPooling2D(pool_size=(2, 2)),
-        Dropout(0.25),
+        SpatialDropout2D(0.1),
 
-        Flatten(),
-        Dense(64, activation='relu',  # Increase from 48
-            kernel_regularizer=tf.keras.regularizers.l2(0.003)),
+        GlobalAveragePooling2D(), 
+
+        # Memory-efficient classification head
+        Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
         BatchNormalization(),
-        Dropout(0.3),  # Reduce dropout
+        Dropout(0.2),  
+        Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(l2=0.0005)),
+        BatchNormalization(),
+        Dropout(0.2),
+
         Dense(num_classes, activation='softmax')
     ])
-    
-
-    # Use it in your optimizer
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+    #Optimizer using Adam
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=0.0001,
+        clipnorm=1.0
+    )
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
+    
+    #Compile Model
     model.compile(
         optimizer=optimizer,
-        loss='categorical_crossentropy',
+        loss=config['train']['loss_function'],
         metrics=['accuracy']
     )
     
@@ -212,8 +183,26 @@ def build_model(image_size, num_classes):
     
     return model
 
+#Learning Rate Scheduler
+def get_learning_rate_scheduler(config):
+    initial_lr = config['train'].get('learning_rate', 0.0001)
+    min_lr = initial_lr * 0.01  # Minimum LR will be 1% of initial LR
+    warmup_epochs = 5  # Warmup for first 5 epochs
+    total_epochs = config['train']['epochs']
+    
+    def scheduler(epoch):
+        # Warmup phase
+        if epoch < warmup_epochs:
+            return initial_lr * ((epoch + 1) / warmup_epochs)
+        
+        # Cosine decay phase
+        progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+        return min_lr + (initial_lr - min_lr) * cosine_decay
+
+    return LearningRateScheduler(scheduler, verbose=1)
+
 def train_model(model, train_data, valid_data, config):
-    """Kaggle-optimized training function."""
     train_generator, train_steps = train_data
     valid_generator, valid_steps = valid_data
 
@@ -229,25 +218,26 @@ def train_model(model, train_data, valid_data, config):
         ModelCheckpoint(
             checkpoint_path,
             monitor='val_loss',
-            mode='min',  # Explicitly set mode
+            mode='min', 
             save_best_only=True,
             verbose=1
         ),
         EarlyStopping(
             monitor='val_loss',
-            mode='min',  # Explicitly set mode
-            patience=20,  # Increase patience since improvement is steady
+            mode='min', 
+            patience=5,  
             restore_best_weights=True,
             verbose=1
         ),
         ReduceLROnPlateau(
             monitor='val_loss',
-            mode='min',  # Explicitly set mode
-            factor=0.2,
-            patience=7,
+            mode='min', 
+            factor=0.5,
+            patience=5,
             min_lr=1e-6,
             verbose=1
-        )
+        ),
+        get_learning_rate_scheduler(config)
     ]
 
     try:
@@ -265,13 +255,13 @@ def train_model(model, train_data, valid_data, config):
         sample_batch = next(iter(train_generator))
         print(f"Sample batch shapes - X: {sample_batch[0].shape}, y: {sample_batch[1].shape}")
         
-        # Start training with garbage collection
-        import gc
+        #Add class weightage to prevent class bias
         class_weights = {
-            0: 1.0,  # Eggtarts
-            1: 1.2,  # Salmon Sashimi (slightly higher weight)
-            2: 1.0   # Unknown
+            0: 1.06,  # Eggtarts
+            1: 1.43,  # Salmon Sashimi 
+            2: 0.74   # Unknown
         }
+
         print("\nStarting training...")
         history = model.fit(
             train_generator,
@@ -282,14 +272,10 @@ def train_model(model, train_data, valid_data, config):
             callbacks=callbacks,
             verbose=1, 
             class_weight=class_weights
-            # workers=2,  # Reduced number of workers
-            # max_queue_size=10,  # Reduced queue size
-            # use_multiprocessing=False  # Disable multiprocessing
         )
         
         gc.collect()  # Force garbage collection
         
-        # Save final model
         print("\nSaving model...")
         model.save(final_model_path, save_format='h5')
         
@@ -309,7 +295,7 @@ def train_model(model, train_data, valid_data, config):
             except Exception as e:
                 print(f"Warning: Could not clean up checkpoint: {str(e)}")
 
-
+#Plot metrics
 def plot_metrics(history, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -331,7 +317,6 @@ def plot_metrics(history, output_dir):
     plt.close()
 
 def evaluate_model(model, valid_data, class_labels, output_dir):
-    """Evaluate model using the validation generator."""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
@@ -400,51 +385,63 @@ def create_directories(paths):
         else:
             print(f"Directory already exists: {path}")
 
-def test_model(model, valid_data, config):
-    """Evaluate the trained model on validation data and display a classification report and confusion matrix."""
-    valid_generator, valid_steps = valid_data
+def test_model(model, test_data, config):
+    test_generator, test_steps = test_data
     class_labels = config['classes']
 
-    # Evaluate the model
-    print("\nEvaluating the model on validation data...")
-    val_loss, val_accuracy = model.evaluate(valid_generator, steps=valid_steps, verbose=1)
-    print(f"\nValidation Loss: {val_loss:.4f}")
-    print(f"Validation Accuracy: {val_accuracy:.4f}")
+    print("\nEvaluating the model on test data...")
+    test_loss, test_accuracy = model.evaluate(test_generator, steps=test_steps, verbose=1)
+    print(f"\nTest Loss: {test_loss:.4f}")
+    print(f"Test Accuracy: {test_accuracy:.4f}")
 
-    # Generate predictions
-    print("\nGenerating predictions...")
+    # Generate predictions on test data
     y_true = []
     y_pred = []
 
-    for i, (images, labels) in enumerate(valid_generator):
-        if i >= valid_steps:
+    for i, (images, labels) in enumerate(test_generator):
+        if i >= test_steps:
             break
         predictions = model.predict(images)
         y_true.extend(np.argmax(labels, axis=1))
         y_pred.extend(np.argmax(predictions, axis=1))
 
-    # Generate classification report
-    print("\nClassification Report:")
-    print(classification_report(y_true, y_pred, target_names=class_labels))
+    # Classification report and confusion matrix
+    report = classification_report(y_true, y_pred, target_names=class_labels)
+    print("\nTest Classification Report:")
+    print(report)
 
-    # Generate confusion matrix
     cm = confusion_matrix(y_true, y_pred)
-    print("\nConfusion Matrix:")
+    print("\nTest Confusion Matrix:")
     print(cm)
 
-    # Plot confusion matrix
-    plt.figure(figsize=(8, 6))
+    # Plot and save confusion matrix
+    plt.figure(figsize=(10, 8))
     plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-    plt.title('Confusion Matrix')
+    plt.title('Test Data Confusion Matrix')
     plt.colorbar()
     tick_marks = np.arange(len(class_labels))
     plt.xticks(tick_marks, class_labels, rotation=45)
     plt.yticks(tick_marks, class_labels)
 
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
+    thresh = cm.max() / 2.
+    for i, j in np.ndindex(cm.shape):
+        plt.text(j, i, format(cm[i, j], 'd'),
+                horizontalalignment="center",
+                color="white" if cm[i, j] > thresh else "black")
+
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
     plt.tight_layout()
-    plt.show()
+    test_output_dir = config['paths'].get('output_diAr', 'output')
+    os.makedirs(test_output_dir, exist_ok=True)
+    plt.savefig(os.path.join(test_output_dir, 'test_confusion_matrix.png'))
+    plt.close()
+
+    # Save test classification report
+    with open(os.path.join(test_output_dir, 'test_classification_report.txt'), 'w') as f:
+        f.write(report)
+
+    return report, cm
 
 def main():
     # Clear any existing sessions
@@ -466,10 +463,10 @@ def main():
     check_gpu_availability()
     
     print("\nPreparing data generators...")
-    train_data, valid_data, num_classes = prepare_data_generators(config)
+    train_data, valid_data, test_data, num_classes = prepare_data_generators(config)
     
     print("\nBuilding model...")
-    model = build_model(config['image_size'], num_classes)
+    model = build_model(config,config['image_size'], num_classes)
     save_model_summary(model, config['paths'].get('output_dir', 'output'))
     
     print("\nTraining model...")
@@ -478,12 +475,19 @@ def main():
     print("\nPlotting metrics...")
     plot_metrics(history, config['paths'].get('plots', 'plots'))
     
-    print("\nEvaluating model...")
-    report, cm = evaluate_model(
+    print("\nEvaluating model on validation data...")
+    evaluate_model(
         model,
         valid_data,
         config['classes'],
         config['paths'].get('output_dir', 'output')
+    )
+    
+    print("\nTesting model on test data...")
+    test_report, test_cm = test_model(
+        model,
+        test_data,
+        config
     )
     
     # Save model architecture and weights

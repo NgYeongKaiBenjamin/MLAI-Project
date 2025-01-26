@@ -4,10 +4,10 @@ from PIL import Image
 import tensorflow as tf
 
 # Load the trained Keras model
-model = tf.keras.models.load_model('saved_model/final_model.h5')
+model = tf.keras.models.load_model('saved_model/final_modelv1.h5')
 
 # Image size used during training
-image_size = 512  # Ensure this matches the image size used in training
+image_size =640  # Ensure this matches the image size used in training
 
 st.write("""
          # Food Classification App
@@ -34,7 +34,7 @@ else:
     predictions = model.predict(image_array)[0]  # Get the predictions for the first batch
 
     # Define the threshold for classification
-    threshold = 0.3
+    threshold = 0.5
     classes = ['Eggtarts', 'Salmon Sashimi', 'Unknown']
 
     # Get the predicted class with the highest probability
@@ -43,12 +43,11 @@ else:
     confidence = predictions[predicted_class_index]
 
     # Check if the confidence is above the threshold
-    if confidence >= threshold:
+    if confidence >= threshold and predicted_class!="Unknown":
         st.write(f"Predicted Class: {predicted_class}")
         st.write(f"Confidence: {confidence:.2%}")
         st.success("Classification completed successfully!")
     else:
         # If confidence is below threshold, classify as Unknown
         st.write(f"Predicted Class: {classes[2]}")
-        st.write(f"Confidence: {confidence:.2%}")
-        st.warning("The model couldn't classify the image with sufficient confidence. It is classified as Unknown.")
+        
